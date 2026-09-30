@@ -211,6 +211,20 @@ def test_coincident_demand_groups_timestamps_and_uses_half_open_window():
     assert demand_violations(loads, [(5, 10), (10, 13)]) == (10,)
 
 
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), -float("inf")])
+def test_coincident_demand_fails_closed_on_negative_and_non_finite_readings(bad):
+    with pytest.raises(ValueError):
+        coincident_peak([(0, 5), (1, bad)], 10)
+    with pytest.raises(ValueError):
+        demand_violations([(0, 5), (1, bad)], [(5, 10)])
+
+
+def test_negative_reading_cannot_subtract_from_the_true_window_peak():
+    # The -6 used to be summed in, hiding the 18-unit true peak behind 12.
+    with pytest.raises(ValueError):
+        coincident_peak([(0, 10), (1, -6), (2, 8)], 10)
+
+
 def test_rework_authorization_combines_budget_defect_and_engineer_gate():
     policy = ReworkPolicy(4, {"ETCH": 2}, frozenset({"D1", "D2"}), frozenset({"D2"}))
     assert authorization_decision(policy, "ETCH", 1, "D1", None).allowed
@@ -322,6 +336,38 @@ def test_containment_record_is_idempotent_and_binds_the_planned_scope():
 def test_powered_assignment_combines_peak_and_maintenance_reasons():
     decision = powered_assignment([(0, 7), (1, 7)], [(5, 10)], MaintenancePolicy(1, 100, 5), 0, 1, 10, TimeBox(10, 20), [])
     assert decision.reasons == ("demand_limit_exceeded:5", "calendar_maintenance_due")
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), -float("inf")])
+def test_powered_assignment_fails_closed_on_bad_readings(bad):
+    decision = powered_assignment([(0, 7), (1, bad)], [(5, 100)], MaintenancePolicy(1, 100, 100), 0, 1, 10, TimeBox(10, 20), [])
+    assert not decision.allowed
+    assert decision.reasons == ("invalid_load_reading:1",)
+    assert decision.evidence["invalid_load_timestamps"] == (1,)
+    assert decision.evidence["violated_windows"] == ()
+
+
+def test_powered_assignment_keeps_bad_data_evidence_alongside_window_and_maintenance_rejections():
+    decision = powered_assignment(
+        [(0, 7), (1, -4), (2, 7)],
+        [(5, 10)],
+        MaintenancePolicy(1, 100, 5),
+        0,
+        1,
+        10,
+        TimeBox(10, 20),
+        [],
+    )
+    assert not decision.allowed
+    assert decision.reasons == (
+        "invalid_load_reading:1",
+        "demand_limit_exceeded:5",
+        "calendar_maintenance_due",
+    )
+    assert decision.evidence["invalid_load_timestamps"] == (1,)
+    assert decision.evidence["violated_windows"] == (5,)
+    assert decision.evidence["policy_revision"] == 1
+    assert decision.evidence["job_start"] == 10 and decision.evidence["job_end"] == 20
 
 
 def test_rework_release_requires_both_authorization_and_hold_completion():
