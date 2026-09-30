@@ -15,7 +15,7 @@ from fabweave.core.units import fraction_to_ppm, ppm_to_fraction
 from fabweave.core.versioning import RevisionHistory
 from fabweave.dedication.tool import DedicationPolicy, policy_decision
 from fabweave.dispatch.priority import DispatchCandidate, rank_candidates
-from fabweave.energy.demand import coincident_peak, demand_violations
+from fabweave.energy.demand import coincident_peak, demand_violations, inspect_loads
 from fabweave.genealogy.carrier import GenealogyGraph
 from fabweave.holds.release import HoldState, release_decision
 from fabweave.lot.merge import Lot, merge_lots
@@ -211,6 +211,27 @@ def test_coincident_demand_groups_timestamps_and_uses_half_open_window():
     assert demand_violations(loads, [(5, 10), (10, 13)]) == (10,)
 
 
+def test_demand_readings_fail_closed_on_negative_and_non_finite():
+    # -5 used to drag the real coincident peak of 12 down to 7 and hide it.
+    cancelled_peak = [(0, -5), (1, 12)]
+    for bad in (cancelled_peak, [(0, 7), (1, -10)], [(0, float("nan"))], [(0, float("inf"))], [(0, float("-inf"))]):
+        with pytest.raises(ValueError):
+            coincident_peak(bad, 5)
+        with pytest.raises(ValueError):
+            demand_violations(bad, [(5, 10)])
+
+
+def test_inspect_loads_preserves_each_rejected_reading_as_evidence():
+    faults = inspect_loads([(0, 4), (1, -3), (2, float("nan")), (3, float("inf")), (4, float("-inf"))])
+    assert [(fault.timestamp, fault.reason) for fault in faults] == [
+        (1, "negative"),
+        (2, "non_finite"),
+        (3, "non_finite"),
+        (4, "non_finite"),
+    ]
+    assert inspect_loads([(0, 4), (1, 0.0)]) == ()
+
+
 def test_rework_authorization_combines_budget_defect_and_engineer_gate():
     policy = ReworkPolicy(4, {"ETCH": 2}, frozenset({"D1", "D2"}), frozenset({"D2"}))
     assert authorization_decision(policy, "ETCH", 1, "D1", None).allowed
@@ -322,6 +343,56 @@ def test_containment_record_is_idempotent_and_binds_the_planned_scope():
 def test_powered_assignment_combines_peak_and_maintenance_reasons():
     decision = powered_assignment([(0, 7), (1, 7)], [(5, 10)], MaintenancePolicy(1, 100, 5), 0, 1, 10, TimeBox(10, 20), [])
     assert decision.reasons == ("demand_limit_exceeded:5", "calendar_maintenance_due")
+
+
+def test_powered_assignment_fails_closed_on_bad_readings_without_filtering():
+    # The negative reading previously cancelled the peak and was silently dropped,
+    # so with maintenance also satisfied the assignment was released outright.
+    clean_policy = MaintenancePolicy(1, 100, 100)
+    released_before_fix = powered_assignment(
+        [(0, 7), (1, -10)],
+        [(5, 10)],
+        clean_policy,
+        0,
+        1,
+        10,
+        TimeBox(20, 30),
+        [],
+    )
+    assert not released_before_fix.allowed
+    assert released_before_fix.reasons == ("demand_load_invalid:negative@1",)
+
+    # With maintenance due as well, both the data fault and maintenance evidence survive.
+    decision = powered_assignment(
+        [(0, 7), (1, -10)],
+        [(5, 10)],
+        MaintenancePolicy(1, 100, 5),
+        0,
+        1,
+        10,
+        TimeBox(10, 20),
+        [],
+    )
+    assert not decision.allowed
+    assert "demand_load_invalid:negative@1" in decision.reasons
+    assert "demand_limit_exceeded:5" not in decision.reasons
+    assert "calendar_maintenance_due" in decision.reasons
+    invalid = decision.evidence["invalid_loads"]
+    assert invalid == ({"timestamp": 1, "value": -10.0, "reason": "negative"},)
+    assert decision.evidence["violated_windows"] == ()
+
+    non_finite = powered_assignment(
+        [(0, 7), (1, float("nan"))],
+        [(5, 10)],
+        MaintenancePolicy(1, 100, 5),
+        0,
+        1,
+        10,
+        TimeBox(10, 20),
+        [],
+    )
+    assert not non_finite.allowed
+    assert "demand_load_invalid:non_finite@1" in non_finite.reasons
 
 
 def test_rework_release_requires_both_authorization_and_hold_completion():

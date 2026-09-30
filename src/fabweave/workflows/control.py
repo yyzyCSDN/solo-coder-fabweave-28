@@ -11,7 +11,7 @@ from fabweave.core.events import EventLog
 from fabweave.core.timebox import TimeBox
 from fabweave.dedication.tool import DedicationPolicy, policy_decision
 from fabweave.dispatch.priority import DispatchCandidate, rank_candidates
-from fabweave.energy.demand import demand_violations
+from fabweave.energy.demand import demand_violations, inspect_loads
 from fabweave.genealogy.carrier import GenealogyGraph
 from fabweave.holds.release import HoldState, release_decision
 from fabweave.lot.merge import Lot, merge_lots
@@ -205,8 +205,19 @@ def powered_assignment(
     job_window: TimeBox,
     maintenance_windows: list[TimeBox],
 ) -> Decision:
-    widths = demand_violations([(timestamp, value) for timestamp, value in loads if value >= 0], demand_windows)
-    demand = deny(*(f"demand_limit_exceeded:{width}" for width in widths), violated_windows=widths) if widths else allow(violated_windows=())
+    faults = inspect_loads(loads)
+    if faults:
+        demand = deny(
+            *(f"demand_load_invalid:{fault.reason}@{fault.timestamp}" for fault in faults),
+            violated_windows=(),
+            invalid_loads=tuple(
+                {"timestamp": fault.timestamp, "value": fault.value, "reason": fault.reason}
+                for fault in faults
+            ),
+        )
+    else:
+        widths = demand_violations(loads, demand_windows)
+        demand = deny(*(f"demand_limit_exceeded:{width}" for width in widths), violated_windows=widths) if widths else allow(violated_windows=())
     maintenance = assignment_decision(maintenance_policy, last_pm_at, run_hours, now, job_window, maintenance_windows)
     return _combine([demand, maintenance])
 

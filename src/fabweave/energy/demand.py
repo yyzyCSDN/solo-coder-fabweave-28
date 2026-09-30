@@ -2,17 +2,38 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 
 from fabweave.core.units import finite_non_negative
+
+
+@dataclass(frozen=True, slots=True)
+class LoadFault:
+    """A single rejected demand reading; never silently dropped."""
+
+    timestamp: int
+    value: float
+    reason: str
+
+
+def inspect_loads(loads: list[tuple[int, float]]) -> tuple[LoadFault, ...]:
+    """Return every negative or non-finite reading as rejection evidence."""
+    faults: list[LoadFault] = []
+    for timestamp, value in loads:
+        if not math.isfinite(value):
+            faults.append(LoadFault(timestamp, value, "non_finite"))
+        elif value < 0:
+            faults.append(LoadFault(timestamp, value, "negative"))
+    return tuple(faults)
 
 
 def coincident_peak(loads: list[tuple[int, float]], window: int) -> float:
     if window <= 0:
         raise ValueError("window must be positive")
+    if inspect_loads(loads):
+        raise ValueError("loads must be finite and non-negative")
     grouped: dict[int, float] = defaultdict(float)
     for timestamp, value in loads:
-        if not math.isfinite(value):
-            raise ValueError("loads must be finite and non-negative")
         grouped[timestamp] += value
     ordered = sorted(grouped.items())
     best = 0.0
